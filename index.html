@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1020" />
+  <title>Fronty Map — Мапа з лінійкою і фронтом</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="map" role="application" aria-label="Інтерактивна карта"></div>
+
+  <!-- Пошук -->
+  <div class="search">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>
+    </svg>
+    <input id="q" type="search" placeholder="Шукати адресу…" autocomplete="off" />
+  </div>
+
+  <!-- Перемикач стилів мапи -->
+  <div class="layer-switch" role="group" aria-label="Стиль мапи">
+    <button class="ls-btn active" data-style="satellite" type="button" title="Супутник">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>
+      <span>Супутник</span>
+    </button>
+    <button class="ls-btn" data-style="roadmap" type="button" title="Схема">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 20l-5.4 2.2A1 1 0 0 1 2.4 21V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v6"/><path d="M2 10h20"/><circle cx="7" cy="14" r="1.5"/></svg>
+      <span>Схема</span>
+    </button>
+    <button class="ls-btn" data-style="terrain" type="button" title="Місцевість">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 20 6-10 4 6 4-4 4 8z"/></svg>
+      <span>Місцевість</span>
+    </button>
+    <button class="ls-btn" data-style="google" type="button" title="Google (потрібен ключ API)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C7 2 3 6 3 11s4 9 9 9 9-4 9-9-4-9-9-9z"/><circle cx="12" cy="11" r="3"/></svg>
+      <span>Google</span>
+    </button>
+  </div>
+
+  <!-- Шар «Фронт»: тогл і лічильник -->
+  <div class="front-panel glass" id="frontPanel">
+    <button class="fp-toggle" id="frontToggle" type="button" aria-pressed="true">
+      <span class="fp-dot"></span>
+      <span class="fp-label">Фронт</span>
+      <span class="fp-count" id="frontCount">…</span>
+    </button>
+    <button class="fp-reload" id="frontReload" type="button" title="Перезавантажити">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+    </button>
+    <button class="fp-fit" id="frontFit" type="button" title="Показати все">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V3h4M21 7V3h-4M3 17v4h4M21 17v4h-4"/></svg>
+    </button>
+  </div>
+
+  <!-- Статус завантаження KML -->
+  <div class="front-status" id="frontStatus" hidden></div>
+
+  <!-- Панель лінійки -->
+  <div class="ruler-panel glass" id="rulerPanel">
+    <button class="rp-toggle" id="rulerToggle" type="button" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.3 8.7 8.7 21.3a4 4 0 0 1-5.6 0L2.7 21a4 4 0 0 1 0-5.6L15.3 2.7a4 4 0 0 1 5.6 0L21 2.8a4 4 0 0 1 0 5.6z"/><path d="m7.5 10.5 2 2"/><path d="m10.5 7.5 2 2"/><path d="m13.5 4.5 2 2"/><path d="m4.5 13.5 2 2"/></svg>
+      <span>Лінійка</span>
+    </button>
+    <div class="rp-info">
+      <div class="rp-total"><span>Загалом</span><strong id="rTotal">0 м</strong></div>
+      <div class="rp-hint" id="rHint">Натисни «Лінійка», потім клікай по карті</div>
+    </div>
+    <button class="rp-clear" id="rulerClear" type="button" title="Очистити">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6 18 20a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+    </button>
+  </div>
+
+  <!-- Telegram -->
+  <a class="tg-fab" href="https://t.me/ukrainanaliticmap" target="_blank" rel="noopener" aria-label="Telegram-канал Україна аналітика мапи">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M9.04 15.39 8.9 19.4c.36 0 .51-.15.7-.34l1.66-1.59 3.45 2.53c.63.35 1.08.17 1.25-.59l2.27-10.65h.01c.2-.94-.34-1.31-.95-1.08L3.3 11.95c-.91.36-.9.87-.16 1.1l3.83 1.19 8.88-5.61c.42-.27.8-.12.49.16l-6.3 5.6z"/></svg>
+    <span class="tg-fab-label">@ukrainanaliticmap</span>
+  </a>
+
+  <style>
+    .seg-tip, .feat-tip {
+      background: rgba(15,21,48,0.95) !important;
+      color: #e8ecf8 !important;
+      border: 1px solid rgba(255,255,255,0.16) !important;
+      border-radius: 8px !important;
+      padding: 4px 8px !important;
+      font: 600 0.82rem 'Manrope', sans-serif !important;
+      box-shadow: 0 8px 22px -10px rgba(0,0,0,0.6) !important;
+      white-space: nowrap;
+    }
+    .seg-tip::before, .feat-tip::before { display: none !important; }
+    /* Стиль попапів */
+    .leaflet-popup-content-wrapper {
+      background: rgba(15, 21, 48, 0.96);
+      color: #e8ecf8;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.16);
+      box-shadow: 0 18px 50px -14px rgba(0,0,0,0.65);
+      backdrop-filter: blur(14px);
+    }
+    .leaflet-popup-tip { background: rgba(15, 21, 48, 0.96); border: 1px solid rgba(255,255,255,0.16); }
+    .leaflet-popup-content { margin: 12px 14px; font: 500 0.9rem 'Manrope', sans-serif; max-width: 280px; }
+    .leaflet-popup-close-button { color: #97a3c2 !important; font-size: 22px !important; padding: 4px 8px !important; }
+    .leaflet-popup-close-button:hover { color: #fff !important; }
+    .pop-title { font: 700 1rem 'Manrope', sans-serif; margin: 0 0 6px; color: #fff; }
+    .pop-desc { color: #c4cce0; font-size: 0.86rem; line-height: 1.4; max-height: 220px; overflow: auto; }
+    .pop-desc img { max-width: 100%; height: auto; border-radius: 8px; margin: 6px 0; }
+    .pop-desc a { color: #7dd3fc; }
+    .pop-meta { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; gap: 6px; flex-wrap: wrap; font-size: 0.78rem; color: #97a3c2; }
+    .pop-meta span { background: rgba(255,255,255,0.06); padding: 2px 8px; border-radius: 6px; }
+    .pop-btn {
+      margin-top: 10px;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 12px;
+      background: linear-gradient(135deg, #7c3aed, #06b6d4);
+      color: #fff;
+      border: 0; border-radius: 8px;
+      font: 700 0.82rem 'Manrope', sans-serif;
+      cursor: pointer;
+      transition: transform .1s;
+    }
+    .pop-btn:hover { transform: translateY(-1px); }
+  </style>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
