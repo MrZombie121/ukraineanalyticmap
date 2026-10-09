@@ -1,26 +1,31 @@
 services:
+  - type: web
+    name: fronty-backend
+    runtime: node
+    branch: main
+    buildCommand: cd server && npm install
+    startCommand: cd server && node server.js
+    plan: free
+    envVars:
+      - key: ADMIN_PASSWORD
+        # Задай свій пароль для захисту /admin і /upload.
+        # Якщо лишити порожнім — завантажувати можна без пароля (не для прода!).
+        value: ""
+      - key: DATA_DIR
+        value: /tmp/fronty-data
+    autoDeploy: true
+
   - type: static_site
-    name: fronty-map
+    name: fronty-frontend
     runtime: static
     branch: main
-    autoDeploy: true
     buildCommand: ""
     staticPublishPath: .
-    headers:
-      # Щоб браузер НЕ стискав вже стислий KMZ
-      - path: /Ukraine Analystic Map UAM.kmz
-        name: Content-Type
-        value: application/vnd.google-earth.kmz
-      - path: /Ukraine Analystic Map UAM.kmz
-        name: Cache-Control
-        value: no-store, max-age=0
-      - path: /front.kmz
-        name: Content-Type
-        value: application/vnd.google-earth.kmz
-      - path: /front.kml
-        name: Content-Type
-        value: application/vnd.google-earth.kml+xml
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
+    envVars:
+      - key: BACKEND_URL
+        # URL бекенда (див. вище). Задається автоматично через render.yaml infra.
+        # Після першого деплою фронт автоматично підключиться до бекенда.
+        fromService:
+          type: web
+          name: fronty-backend
+          property: hostUrl

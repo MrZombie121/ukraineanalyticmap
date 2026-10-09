@@ -159,15 +159,37 @@
   // ============================================================
   const KML_MID = '1E7cefbjfT33zErTQADATnyZ_SVChrJc';
 
-  // Віддалений URL твого KMZ. Залиш порожнім, якщо кладеш файл локально.
+  // Віддалений URL твого KMZ. Залиш порожнім '', якщо кладеш файл локально.
   // Приклади:
   //   'https://pub-xxxxxx.r2.dev/kmzfile/Ukraine%20Analystic%20Map%20UAM.kmz'
   //   'https://my-bucket.r2.dev/front.kmz'
   //   'https://raw.githubusercontent.com/USER/REPO/main/front.kmz'
-  const FRONT_REMOTE_URL = 'https://pub-xxxxxxxxxxxx.r2.dev/kmzfile/Ukraine%20Analystic%20Map%20UAM.kmz';
+  const FRONT_REMOTE_URL = 'http://localhost:3001/kmz';
 
   // Інтервал автооновлення (хвилини). 0 = вимкнено.
-  const FRONT_REFRESH_MIN = 10;
+  const FRONT_REFRESH_MIN = 5;
+
+  // URL бекенда — автоматично визначає:
+  // 1. window.__BACKEND_URL__ якщо задано вручну (override)
+  // 2. https://<same-hostname>:10000 для Render (якщо домен співпадає, але порт 10000)
+  // 3. http://localhost:3001 для локальної розробки
+  const BACKEND_URL = (() => {
+    const override = (typeof window !== 'undefined' && window.__BACKEND_URL__) || '';
+    if (override) return override.replace(/\/+$/, '');
+    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      // На Render або іншому хостингу — спробуємо піддомен 'backend' або окремий сервіс
+      const host = window.location.hostname;
+      // Якщо фронт на fronty-map.onrender.com, бекенд на fronty-backend.onrender.com
+      if (host.includes('onrender.com')) {
+        return 'https://' + host.replace(/^fronty-/, 'fronty-backend-');
+      }
+      // Інакше — той самий хост, порт 3001
+      return `${window.location.protocol}//${host}:3001`;
+    }
+    return 'http://localhost:3001';
+  })();
+
+  const BACKEND_WS = BACKEND_URL.replace(/^http/, 'ws') + '/ws';
 
   const frontState = {
     enabled: true,
@@ -224,8 +246,19 @@
     Array.from(node.children).forEach(child => {
       const tag = child.nodeName.toLowerCase();
       if (tag === 'placemark') out.push(readPlacemark(child, styles));
-      else if (tag === 'networklink' || tag === 'folder' || tag === 'document') {
+      else if (tag === 'folder' || tag === 'document') {
         collectPlacemarks(child, styles, out);
+      } else if (tag === 'networklink') {
+        // NetworkLink — це лінк на інший KML, всередині нього даних немає.
+        // Збережемо URL для KML_SOURCES як додаткове джерело.
+        const href = child.querySelector('Link > href, link > href');
+        if (href) {
+          const url = href.textContent.trim();
+          if (url && !KML_SOURCES.some(fn => fn() === url)) {
+            console.log('[Fronty] NetworkLink →', url);
+            // Не додаємо динамічно (KML_SOURCES const), але можемо показати підказку
+          }
+        }
       }
     });
   }
@@ -383,61 +416,24 @@
     return { point: 'Точка', linestring: 'Лінія', polygon: 'Полігон' }[k] || k;
   }
 
-  // Маркери для точок: або кастомна іконка з KML (через canvas), або кольорова крапка
+  // Маркери для точок: гарна кольорова крапка з рамкою (divIcon — синхронно, без async)
+  // Ігноруємо iconHref з KML (там завжди одна й та сама gstatic-іконка),
+  // а реальний колір беремо з <IconStyle><color> у KML.
   function makePointIcon(item) {
-    if (item.iconHref) {
-      // Якщо в KML реальна іконка з gstatic — малюємо її на canvas, забарвлюючи у потрібний колір
-      return makeStyledIcon(item.iconHref, item.iconColor);
+    let c = '#ef4444'; // дефолт — червоний
+    if (item.iconColor) {
+      // item.iconColor — це KML aabbggrr; parseKmlColor поверне rgba(...)
+      const rgba = parseKmlColor(item.iconColor);
+      if (rgba) {
+        const hex = colorToHex(rgba);
+        if (hex) c = hex;
+      }
     }
-    const c = colorToHex(item.iconColor ? parseKmlColor(item.iconColor) : 'rgba(239,68,68,0.9)') || '#ef4444';
     return L.divIcon({
       className: 'kml-marker',
-      html: `<div style="width:18px;height:18px;border-radius:50%;background:${c};border:3px solid #fff;box-shadow:0 0 0 4px ${c}40, 0 6px 14px rgba(0,0,0,0.45);"></div>`,
+      html: `<div style="width:18px;height:18px;border-radius:50%;background:${c};border:3px solid #fff;box-shadow:0 0 0 4px ${c}55, 0 6px 14px rgba(0,0,0,0.45);"></div>`,
       iconSize: [18, 18], iconAnchor: [9, 9],
     });
-  }
-
-  // Завантажуємо зображення, перефарбовуємо через canvas (бо KML задає color для білої іконки)
-  async function makeStyledIcon(href, colorStr) {
-    const defaultIcon = L.divIcon({
-      className: 'kml-marker',
-      html: '<div style="width:18px;height:18px;border-radius:50%;background:#ef4444;border:3px solid #fff;box-shadow:0 0 0 4px #ef444440, 0 6px 14px rgba(0,0,0,0.45);"></div>',
-      iconSize: [18, 18], iconAnchor: [9, 9],
-    });
-    try {
-      // Парсимо колір
-      let rgba = parseKmlColor(colorStr) || 'rgba(239,68,68,1)';
-      // gstatic іконки — білі, тому накладемо color як накладку
-      const res = await fetch(href, { mode: 'cors' });
-      if (!res.ok) return defaultIcon;
-      const blob = await res.blob();
-      const bitmap = await createImageBitmap(blob);
-      const canvas = document.createElement('canvas');
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
-      const ctx = canvas.getContext('2d');
-      // Спочатку фарбуємо
-      ctx.drawImage(bitmap, 0, 0);
-      // Потім накладаємо колір (multiply)
-      const m = rgba.match(/rgba?\(([^)]+)\)/);
-      if (m) {
-        const [r, g, b, a = 1] = m[1].split(',').map(s => parseFloat(s.trim()));
-        ctx.globalCompositeOperation = 'source-atop';
-        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${a})`;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.globalCompositeOperation = 'destination-over';
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
-      return L.icon({
-        iconUrl: canvas.toDataURL('image/png'),
-        iconSize: [32, 32],
-        iconAnchor: [16, 32],
-        popupAnchor: [0, -28],
-      });
-    } catch (e) {
-      return defaultIcon;
-    }
   }
 
   function renderPlacemark(item) {
@@ -502,9 +498,16 @@
   }
 
   // Спроба завантажити KML — перевіряємо джерела по порядку
+  // FRONT_REMOTE_URL може бути перепризначений через window.__BACKEND_URL__ (на Render)
+  const REMOTE_BASE = (() => {
+    const override = (typeof window !== 'undefined' && window.__BACKEND_URL__) || '';
+    if (override) return override + '/kmz';
+    return FRONT_REMOTE_URL || (BACKEND_URL + '/kmz');
+  })();
+
   const KML_SOURCES = [
-    // 1. Віддалений URL (R2/Dropbox/GitHub/raw) — пріоритет, бо ти можеш оновлювати без деплою
-    () => FRONT_REMOTE_URL ? FRONT_REMOTE_URL + '?t=' + Date.now() : null,
+    // 1. Бекенд (Render або локальний)
+    () => REMOTE_BASE ? REMOTE_BASE + '?t=' + Date.now() : null,
     // 2. Локальний файл у папці сайту. Перевіряємо кілька варіантів імен.
     () => `./Ukraine%20Analystic%20Map%20UAM.kmz?t=${Date.now()}`,
     () => `./Ukraine Analystic Map UAM.kmz?t=${Date.now()}`,
@@ -575,53 +578,109 @@
     clearStatus();
   }
 
+  // Ланцюжок CORS-проксі для обходу блокування Google
+  const CORS_PROXIES = [
+    { name: 'allorigins.get',     build: u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}&_t=${Date.now()}`, extract: j => j.contents },
+    { name: 'allorigins.raw',     build: u => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}&_t=${Date.now()}` },
+    { name: 'corsproxy.io',       build: u => `https://corsproxy.io/?${encodeURIComponent(u)}&_t=${Date.now()}` },
+    { name: 'cors-anywhere',      build: u => `https://cors-anywhere.herokuapp.com/${u}?_t=${Date.now()}` },
+  ];
+
+  // Витягує NetworkLink з KML/KMZ (якщо є — це лінк на реальний KML з Google)
+  function extractNetworkLink(kmlText) {
+    try {
+      const doc = new DOMParser().parseFromString(kmlText, 'application/xml');
+      const href = doc.querySelector('NetworkLink > Link > href, NetworkLink > link > href');
+      return href ? href.textContent.trim() : null;
+    } catch { return null; }
+  }
+
+  // Знайдений URL з NetworkLink — для автооновлення
+  let discoveredNetworkLink = null;
+
   async function loadFrontAuto(forceFit = true) {
     setStatus('Завантаження KML…');
-    // Діагностика: пробуємо всі джерела і збираємо детальні помилки
     const attempts = [];
-    for (let i = 0; i < KML_SOURCES.length; i++) {
-      const build = KML_SOURCES[i];
-      const url = build();
-      if (!url) continue;
-      try {
-        const res = await fetch(url, { cache: 'no-store' });
-        if (!res.ok) {
-          attempts.push(`❌ [${i + 1}/${KML_SOURCES.length}] ${shortUrl(url)} → HTTP ${res.status}`);
-          continue;
+
+    // Спочатку шукаємо NetworkLink у всіх локальних джерелах
+    let networkLinkUrl = discoveredNetworkLink;
+    if (!networkLinkUrl) {
+      for (const build of KML_SOURCES) {
+        const url = build();
+        if (!url) continue;
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (!res.ok) continue;
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+          const blob = await res.blob();
+          let text;
+          if (url.toLowerCase().endsWith('.kmz') || ct.includes('kmz')) {
+            try { text = await unzipKmz(await blob.arrayBuffer()); }
+            catch { continue; }
+          } else {
+            text = await blob.text();
+          }
+          // Шукаємо NetworkLink
+          const nl = extractNetworkLink(text);
+          if (nl) {
+            networkLinkUrl = nl;
+            attempts.push(`✅ [NetworkLink] знайдено в ${shortUrl(url)}`);
+            console.log('[Fronty] NetworkLink:', nl);
+            break;
+          }
+          // Якщо це вже справжній KML з Placemark — застосуємо напряму
+          if (text.includes('<Placemark') && !text.includes('<NetworkLink')) {
+            try {
+              await applyKmlText(text, { fit: forceFit });
+              console.log('[Fronty] OK (прямий KML):', attempts.join('\n'));
+              return;
+            } catch (e) {
+              attempts.push(`❌ [applyKmlText] ${e.message}`);
+            }
+          }
+        } catch (e) {
+          attempts.push(`❌ [${shortUrl(url)}] ${e.message}`);
         }
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        const blob = await res.blob();
-        let text;
-        if (url.toLowerCase().endsWith('.kmz') || ct.includes('kmz')) {
-          try {
-            text = await unzipKmz(await blob.arrayBuffer());
-            attempts.push(`✅ [${i + 1}/${KML_SOURCES.length}] ${shortUrl(url)} → KMZ розпаковано`);
-          } catch (e) {
-            attempts.push(`❌ [${i + 1}/${KML_SOURCES.length}] ${shortUrl(url)} → KMZ: ${e.message}`);
+      }
+    }
+
+    if (networkLinkUrl) {
+      discoveredNetworkLink = networkLinkUrl;
+      // Підтягуємо реальний KML через ланцюжок CORS-проксі
+      for (const proxy of CORS_PROXIES) {
+        const proxyUrl = proxy.build(networkLinkUrl);
+        try {
+          setStatus(`Завантаження через ${proxy.name}…`);
+          const res = await fetch(proxyUrl, { cache: 'no-store' });
+          if (!res.ok) {
+            attempts.push(`❌ [${proxy.name}] HTTP ${res.status}`);
             continue;
           }
-        } else {
-          text = await blob.text();
-          attempts.push(`✅ [${i + 1}/${KML_SOURCES.length}] ${shortUrl(url)} → ${text.length} байт`);
-        }
-        // Спроба застосувати
-        try {
+          let text;
+          if (proxy.extract) {
+            const j = await res.json();
+            text = proxy.extract(j);
+          } else {
+            text = await res.text();
+          }
+          if (!text || !text.includes('<Placemark')) {
+            attempts.push(`❌ [${proxy.name}] відповідь не містить Placemark (${text.length} байт)`);
+            continue;
+          }
           await applyKmlText(text, { fit: forceFit });
+          attempts.push(`✅ [${proxy.name}] ${text.length} байт — фронт завантажено`);
           console.log('[Fronty] OK:', attempts.join('\n'));
           return;
         } catch (e) {
-          attempts.push(`❌ [applyKmlText] ${e.message}`);
-          continue;
+          attempts.push(`❌ [${proxy.name}] ${e.message}`);
         }
-      } catch (e) {
-        attempts.push(`❌ [${i + 1}/${KML_SOURCES.length}] ${shortUrl(url)} → ${e.message}`);
       }
     }
-    // Жодне не спрацювало
+
+    // Якщо дійшли сюди — все впало
     const summary = attempts.join(' · ');
     console.warn('[Fronty] Всі джерела недоступні:\n' + summary);
     showDetailedError(summary);
-    // Не зникаємо автоматично — користувач має побачити банер
   }
 
   function shortUrl(url) {
@@ -862,11 +921,48 @@
   // Спробуємо автоматично; якщо не вийде — UI підкаже
   loadFrontAuto(true);
 
-  // Автооновлення фронту раз на N хвилин (тихо, без перезапису виду)
+  // === WebSocket: миттєве оновлення від бекенда ===
+  let ws = null;
+  let wsReconnectDelay = 1000;
+  function connectWs() {
+    try {
+      ws = new WebSocket(BACKEND_WS);
+      ws.addEventListener('open', () => {
+        console.log('[WS] Підключено до', BACKEND_WS);
+        wsReconnectDelay = 1000;
+      });
+      ws.addEventListener('message', (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'kmz-updated') {
+            console.log('[WS] Оновлення KMZ від бекенда:', msg);
+            loadFrontAuto(false);
+          } else if (msg.type === 'hello') {
+            console.log('[WS] Привіт від бекенда, розмір=%.1f КБ', (msg.kmzSize || 0) / 1024);
+          }
+        } catch (err) {
+          console.warn('[WS] Невідомий формат:', e.data);
+        }
+      });
+      ws.addEventListener('close', () => {
+        console.log('[WS] Зʼєднання закрито, повтор через %.1f с', wsReconnectDelay / 1000);
+        setTimeout(connectWs, wsReconnectDelay);
+        wsReconnectDelay = Math.min(wsReconnectDelay * 2, 30_000); // до 30 сек
+      });
+      ws.addEventListener('error', (e) => {
+        console.warn('[WS] Помилка:', e.message || e);
+      });
+    } catch (e) {
+      console.warn('[WS] Не вдалося підключитися:', e.message);
+    }
+  }
+  connectWs();
+
+  // === Polling fallback (на випадок якщо WS недоступний) ===
   if (FRONT_REFRESH_MIN > 0) {
     setInterval(() => {
-      if (frontState.features.length > 0) {
-        console.log('[Fronty] Автооновлення фронту…');
+      if (frontState.features.length > 0 && (!ws || ws.readyState !== 1)) {
+        console.log('[Fronty] Polling-оновлення фронту…');
         loadFrontAuto(false);
       }
     }, FRONT_REFRESH_MIN * 60 * 1000);

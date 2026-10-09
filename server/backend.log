@@ -1,0 +1,26 @@
+[ok] Завантажено Ukraine Analystic Map UAM.kmz (186799 байт, mtime=2026-10-09T19:45:43.309Z)
+[ws] Сповіщено 0 клієнт(ів)
+════════════════════════════════════════════════════════════
+🟢 Fronty Backend на http://localhost:3001
+════════════════════════════════════════════════════════════
+   GET  /health        → статус
+   GET  /kmz           → поточний KMZ з CORS
+   GET  /admin         → форма завантаження
+   POST /upload        → завантажити новий файл (multipart/form-data, поле "file")
+   WS   /ws            → сповіщення про оновлення
+════════════════════════════════════════════════════════════
+   DATA_DIR: D:\Uas FRONTY\server\data
+   Поточний файл: Ukraine Analystic Map UAM.kmz
+════════════════════════════════════════════════════════════
+[ws+] ::1 (всього: 1)
+[19:54:27] GET /health
+[19:55:42] GET /admin
+[19:55:55] POST /upload
+[19:56:38] POST /upload
+[upload] Збережено test-upload.kmz → D:\Uas FRONTY\server\data\fronty.kmz (186799 байт)
+[ok] Завантажено fronty.kmz (186799 байт, mtime=2026-10-09T19:56:38.982Z)
+[ws] Сповіщено 1 клієнт(ів)
+[19:56:38] GET /kmz?t=1791575798988
+[19:56:39] GET /health
+[20:10:02] GET /kmz?t=1791576602229
+[ws-] ::1 (залишилось: 0)
