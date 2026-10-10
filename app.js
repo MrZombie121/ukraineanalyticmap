@@ -122,7 +122,18 @@
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
     { ...baseOpts, maxZoom: 19, attribution: 'Tiles © Esri' }
   );
-  const layers = { satellite: layerSatellite, roadmap: layerRoadmap, terrain: layerTerrain, google: null };
+  // Схема як Google Maps — справжні тайли Google через спеціальний публічний endpoint
+  // Цей шар не потребує API-ключа для відображення (умовно безкоштовний для personal use)
+  const layerGoogle = L.tileLayer(
+    'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+    {
+      ...baseOpts,
+      maxZoom: 20,
+      attribution: '© Google',
+      subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+    }
+  );
+  const layers = { satellite: layerSatellite, roadmap: layerRoadmap, terrain: layerTerrain, google: layerGoogle };
   layers.satellite.addTo(map);
   let activeKey = 'satellite';
 
@@ -133,10 +144,6 @@
     });
     if (layers[key]) {
       layers[key].addTo(map);
-    } else if (key === 'google') {
-      alert('Google Maps потребує API-ключ. Відкрий app.js і встав GOOGLE_MAPS_API_KEY.');
-      layers.satellite.addTo(map);
-      key = 'satellite';
     }
     activeKey = key;
     document.querySelectorAll('.ls-btn').forEach(b => {

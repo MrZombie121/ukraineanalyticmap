@@ -16,7 +16,7 @@ services:
       - key: DATA_DIR
         value: /tmp/fronty-data
       - key: ALLOWED_ORIGINS
-        value: "https://uaanalyticmap.pp.ua,http://localhost:3000"
+        value: "https://uaanalyticmap.pp.ua,http://localhost:3000,https://www.uaanalyticmap.pp.ua"
     autoDeploy: true
 
   # Static Site — фронт
