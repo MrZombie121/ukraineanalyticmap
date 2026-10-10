@@ -1,31 +1,30 @@
 services:
+  # Web Service — бекенд з KMZ API
+  # Домен: api.uaanalyticmap.pp.ua (додати в Settings → Custom Domains)
   - type: web
     name: fronty-backend
     runtime: node
     branch: main
-    buildCommand: cd server && npm install
-    startCommand: cd server && node server.js
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node server.js
     plan: free
+    healthCheckPath: /health
     envVars:
       - key: ADMIN_PASSWORD
-        # Задай свій пароль для захисту /admin і /upload.
-        # Якщо лишити порожнім — завантажувати можна без пароля (не для прода!).
         value: ""
       - key: DATA_DIR
         value: /tmp/fronty-data
+      - key: ALLOWED_ORIGINS
+        value: "https://uaanalyticmap.pp.ua,http://localhost:3000"
     autoDeploy: true
 
-  - type: static_site
+  # Static Site — фронт
+  # Домен: uaanalyticmap.pp.ua (додати в Settings → Custom Domains)
+  - type: web
     name: fronty-frontend
     runtime: static
     branch: main
-    buildCommand: ""
-    staticPublishPath: .
-    envVars:
-      - key: BACKEND_URL
-        # URL бекенда (див. вище). Задається автоматично через render.yaml infra.
-        # Після першого деплою фронт автоматично підключиться до бекенда.
-        fromService:
-          type: web
-          name: fronty-backend
-          property: hostUrl
+    buildCommand: npm run build
+    publishPath: build
+    autoDeploy: true

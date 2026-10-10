@@ -171,20 +171,23 @@
 
   // URL бекенда — автоматично визначає:
   // 1. window.__BACKEND_URL__ якщо задано вручну (override)
-  // 2. https://<same-hostname>:10000 для Render (якщо домен співпадає, але порт 10000)
-  // 3. http://localhost:3001 для локальної розробки
+  //    ДОДАЙ В HTML перед app.js:
+  //    <script>window.__BACKEND_URL__ = 'https://api.uaanalyticmap.pp.ua';</script>
+  // 2. Якщо override не задано — для .pp.ua/.com тощо: api.<поточний-хост>
+  // 3. На Render: <name>-backend.onrender.com
+  // 4. http://localhost:3001 для локальної розробки
   const BACKEND_URL = (() => {
     const override = (typeof window !== 'undefined' && window.__BACKEND_URL__) || '';
     if (override) return override.replace(/\/+$/, '');
-    if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      // На Render або іншому хостингу — спробуємо піддомен 'backend' або окремий сервіс
+    if (typeof window !== 'undefined') {
       const host = window.location.hostname;
-      // Якщо фронт на fronty-map.onrender.com, бекенд на fronty-backend.onrender.com
-      if (host.includes('onrender.com')) {
-        return 'https://' + host.replace(/^fronty-/, 'fronty-backend-');
+      if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:3001';
+      if (host.endsWith('.onrender.com')) {
+        const base = host.replace('.onrender.com', '');
+        return `https://${base}-backend.onrender.com`;
       }
-      // Інакше — той самий хост, порт 3001
-      return `${window.location.protocol}//${host}:3001`;
+      // Для кастомних доменів (pp.ua, com, тощо) — автоматично api.<домен>
+      return `${window.location.protocol}//api.${host}`;
     }
     return 'http://localhost:3001';
   })();
@@ -462,11 +465,17 @@
           const c = readCoords({ children: [ring] });
           if (c.length) ringLatLngs.push(c);
         });
+        // Гарантуємо, що полігон буде хоч трохи видимий
+        const safeOpacity = Math.max(polyOpacity || 0, 0.25);
+        const safeColor = polyHex || lineHex;
         layer = L.polygon(ringLatLngs, {
           color: lineHex,
-          weight: 2,
-          fillColor: polyHex,
-          fillOpacity: polyOpacity,
+          weight: item.lineWidth || 2,
+          fillColor: safeColor,
+          fillOpacity: safeOpacity,
+          opacity: 0.9,
+          // Не даємо Leaflet прибрати прозорі fill
+          fill: true,
         });
       }
       if (layer) {
@@ -551,6 +560,24 @@
     await new Promise(r => setTimeout(r, 30));
     const placemarks = parseKML(text);
     if (!placemarks.length) throw new Error('KML не містить обʼєктів');
+
+    // Лічильники для дебагу
+    let totalGeom = 0, withPoints = 0, withPolygons = 0, withLines = 0;
+    placemarks.forEach(p => {
+      p.geometry.forEach(g => {
+        totalGeom++;
+        if (g.kind === 'point') withPoints++;
+        if (g.kind === 'polygon') withPolygons++;
+        if (g.kind === 'linestring') withLines++;
+      });
+    });
+    console.log('[Fronty] KML статистика:', {
+      placemarks: placemarks.length,
+      totalGeometryParts: totalGeom,
+      points: withPoints,
+      polygons: withPolygons,
+      lines: withLines,
+    });
 
     if (frontState.layer) map.removeLayer(frontState.layer);
     frontState.layer = L.layerGroup().addTo(map);

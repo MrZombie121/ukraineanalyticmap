@@ -34,10 +34,20 @@ const FALLBACK_PATHS = [
 const app = express();
 
 // CORS для API та KMZ
+// На Render задай env: ALLOWED_ORIGINS="https://uaanalyticmap.pp.ua,http://localhost:3000"
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
+  .split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors({
-  origin: '*',
+  origin: ALLOWED_ORIGINS.length === 1 && ALLOWED_ORIGINS[0] === '*'
+    ? '*'
+    : (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) return cb(null, true);
+        cb(new Error('CORS: origin ' + origin + ' not allowed'));
+      },
   methods: ['GET', 'POST', 'HEAD', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'X-Admin-Token'],
+  credentials: false,
 }));
 
 // Логування
