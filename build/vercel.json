@@ -1,0 +1,36 @@
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" }
+      ]
+    },
+    {
+      "source": "/front.kmz",
+      "headers": [
+        { "key": "Content-Type", "value": "application/vnd.google-earth.kmz" },
+        { "key": "Content-Encoding", "value": "identity" },
+        { "key": "Cache-Control", "value": "no-store, max-age=0" }
+      ]
+    },
+    {
+      "source": "/Ukraine Analystic Map UAM.kmz",
+      "headers": [
+        { "key": "Content-Type", "value": "application/vnd.google-earth.kmz" },
+        { "key": "Content-Encoding", "value": "identity" },
+        { "key": "Cache-Control", "value": "no-store, max-age=0" }
+      ]
+    },
+    {
+      "source": "/front.kml",
+      "headers": [
+        { "key": "Content-Type", "value": "application/vnd.google-earth.kml+xml" },
+        { "key": "Cache-Control", "value": "no-store, max-age=0" }
+      ]
+    }
+  ],
+  "cleanUrls": true,
+  "trailingSlash": false
+}

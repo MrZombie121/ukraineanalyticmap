@@ -122,10 +122,11 @@
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
     { ...baseOpts, maxZoom: 19, attribution: 'Tiles © Esri' }
   );
-  // Схема як Google Maps — справжні тайли Google через спеціальний публічний endpoint
-  // Цей шар не потребує API-ключа для відображення (умовно безкоштовний для personal use)
+  // Схема як Google Maps — справжні тайли Google через публічний вектор-tile endpoint.
+  // Не потребує API-ключа (той самий endpoint, що працює в SkywatchUA).
+  // {s} — Leaflet підставляє subdomain з масиву, тож URL не має містити фіксованого mt0/mt1/etc.
   const layerGoogle = L.tileLayer(
-    'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
+    'https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}',
     {
       ...baseOpts,
       maxZoom: 20,
@@ -171,7 +172,7 @@
   //   'https://pub-xxxxxx.r2.dev/kmzfile/Ukraine%20Analystic%20Map%20UAM.kmz'
   //   'https://my-bucket.r2.dev/front.kmz'
   //   'https://raw.githubusercontent.com/USER/REPO/main/front.kmz'
-  const FRONT_REMOTE_URL = 'http://localhost:3001/kmz';
+  const FRONT_REMOTE_URL = ''; // <- визначається автоматично через BACKEND_URL
 
   // Інтервал автооновлення (хвилини). 0 = вимкнено.
   const FRONT_REFRESH_MIN = 5;
@@ -188,6 +189,7 @@
     if (override) return override.replace(/\/+$/, '');
     if (typeof window !== 'undefined') {
       const host = window.location.hostname;
+      if (!host) return 'http://localhost:3001';
       if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:3001';
       if (host.endsWith('.onrender.com')) {
         const base = host.replace('.onrender.com', '');
@@ -451,10 +453,56 @@
     let bounds = null;
     const lineHex = colorToHex(item.lineColor) || '#f43f5e';
     const polyHex = colorToHex(item.polyColor) || '#7c3aed';
-    const polyOpacity = item.polyColor ? (parseFloat(item.polyColor.match(/[\d.]+\)$/)?.[0].slice(0, -1)) || 0.3) : 0.3;
+    const polyOpacity = item.polyColor ? (parseFloat(item.polyColor.match(/[\d.]+\)$/)?.[0].slice(0, -1)) || 0.3 : 0.3;
 
     item.geometry.forEach(g => {
-      const pts = readCoords(g.node);
+      let pts;
+      if (g.kind === 'polygon') {
+        // У KML <coordinates> може лежати:
+        //   - напряму в <Polygon> (Google My Maps експорт)
+        //   - всередині <outerBoundaryIs><LinearRing> (стандарт)
+        // Тому пробуємо обидва варіанти.
+        const ringLatLngs = [];
+        // Варіант 1: <coordinates> прямо в <Polygon>
+        const directCoords = readCoords(g.node);
+        if (directCoords.length) {
+          ringLatLngs.push(directCoords);
+        } else {
+          // Варіант 2: шукаємо <LinearRing>
+          const rings = g.node.querySelectorAll('LinearRing');
+          rings.forEach(ring => {
+            const c = readCoords(ring);
+            if (c.length) ringLatLngs.push(c);
+          });
+        }
+        // Детальний лог для перших 3 полігонів
+        if (!window.__polyDiagLogged && item.name) {
+          console.log('[fronty:polygon-debug]', item.name, '→ directCoords=', directCoords?.length || 0, 'ringLatLngs=', ringLatLngs.length);
+          window.__polyDiagLogged = true;
+        }
+        if (!ringLatLngs.length) { window.__skippedPoly = (window.__skippedPoly || 0) + 1; return; } // нічого рендерити
+        const safeOpacity = Math.max(polyOpacity || 0, 0.25);
+        const safeColor = polyHex || lineHex;
+        const layer = L.polygon(ringLatLngs, {
+          color: lineHex,
+          weight: item.lineWidth || 2,
+          fillColor: safeColor,
+          fillOpacity: safeOpacity,
+          opacity: 0.9,
+          fill: true,
+        });
+        layer.bindPopup(buildPopupHtml(item), { maxWidth: 320, className: 'kml-popup' });
+        layer.on('popupopen', (e) => {
+          const btn = e.popup.getElement().querySelector('[data-act="zoom"]');
+          if (btn) btn.addEventListener('click', () => zoomToItem(item), { once: true });
+        });
+        layer.on('click', () => layer.openPopup());
+        layersArr.push(layer);
+        const b = layer.getBounds();
+        bounds = bounds ? bounds.extend(b) : L.latLngBounds(b);
+        return;
+      }
+      pts = readCoords(g.node);
       if (!pts.length) return;
       let layer;
       if (g.kind === 'point') {
@@ -464,25 +512,6 @@
           color: lineHex,
           weight: item.lineWidth || 3,
           opacity: 0.9,
-        });
-      } else if (g.kind === 'polygon') {
-        const rings = g.node.querySelectorAll('LinearRing');
-        const ringLatLngs = [];
-        rings.forEach(ring => {
-          const c = readCoords({ children: [ring] });
-          if (c.length) ringLatLngs.push(c);
-        });
-        // Гарантуємо, що полігон буде хоч трохи видимий
-        const safeOpacity = Math.max(polyOpacity || 0, 0.25);
-        const safeColor = polyHex || lineHex;
-        layer = L.polygon(ringLatLngs, {
-          color: lineHex,
-          weight: item.lineWidth || 2,
-          fillColor: safeColor,
-          fillOpacity: safeOpacity,
-          opacity: 0.9,
-          // Не даємо Leaflet прибрати прозорі fill
-          fill: true,
         });
       }
       if (layer) {
@@ -604,6 +633,13 @@
       }
       frontState.features.push(item);
     });
+
+    // Діагностика: скільки шарів додано в FeatureGroup
+    console.log('[fronty] додано шарів на карту:', frontState.layer.getLayers().length,
+      '(очікувалось ~', placemarks.length, ')');
+    const polyLayers = frontState.layer.getLayers().filter(l => l instanceof L.Polygon);
+    console.log('[fronty] полігонів на карті:', polyLayers.length);
+    console.log('[fronty] пропущено полігонів через !ringLatLngs.length:', window.__skippedPoly || 0);
 
     fCount.textContent = String(frontState.features.length);
     if (fit && frontState.bounds && frontState.bounds.isValid()) {
