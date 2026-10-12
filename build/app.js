@@ -95,9 +95,32 @@
   // ============================================================
   //  КАРТА
   // ============================================================
+  // Центр України (Київ) — стартова точка за замовчуванням.
+  // Можна перевизначити через URL hash (#z=6&lat=50.45&lng=30.52)
+  function readHashView() {
+    const m = location.hash.match(/(?:^#|[&#])z=(\d+(?:\.\d+)?)/);
+    const la = location.hash.match(/lat=(-?\d+(?:\.\d+)?)/);
+    const ln = location.hash.match(/lng=(-?\d+(?:\.\d+)?)/);
+    return {
+      zoom: m ? parseFloat(m[1]) : 6,
+      lat: la ? parseFloat(la[1]) : 50.4501,
+      lng: ln ? parseFloat(ln[1]) : 30.5234,
+    };
+  }
+  function writeHashView() {
+    const c = map.getCenter();
+    const z = map.getZoom().toFixed(2);
+    const lat = c.lat.toFixed(5);
+    const lng = c.lng.toFixed(5);
+    const h = `#z=${z}&lat=${lat}&lng=${lng}`;
+    if (location.hash !== h) {
+      history.replaceState(null, '', h);
+    }
+  }
+  const initialView = readHashView();
   const map = L.map('map', {
-    center: [46.4825, 30.7233],
-    zoom: 13,
+    center: [initialView.lat, initialView.lng],
+    zoom: initialView.zoom,
     minZoom: 2,
     maxZoom: 19,
     zoomControl: false,
@@ -138,6 +161,13 @@
   layers.satellite.addTo(map);
   let activeKey = 'satellite';
 
+  // Відстежуємо, чи користувач вже взаємодіяв з мапою (рухав/зумив).
+  // Поки ні — flyToBounds при першому applyKmlText дозволено.
+  let userTouchedMap = false;
+  map.on('movestart zoomstart', () => {
+    if (hashWriteTimer) userTouchedMap = true;
+  });
+
   function switchLayer(key) {
     if (key === activeKey && layers[key]) return;
     Object.entries(layers).forEach(([k, l]) => {
@@ -161,6 +191,17 @@
   setTimeout(fixSize, 300);
   window.addEventListener('resize', fixSize);
   window.addEventListener('load', fixSize);
+
+  // Зберігаємо поточний вид у URL hash, щоб при перезавантаженні лишитися
+  // на тому ж місці (з невеликою затримкою, щоб не смикати адресний рядок).
+  let hashWriteTimer = null;
+  function scheduleHashUpdate() {
+    if (hashWriteTimer) clearTimeout(hashWriteTimer);
+    hashWriteTimer = setTimeout(writeHashView, 250);
+  }
+  map.on('moveend zoomend', scheduleHashUpdate);
+  // Записати одразу, щоб адреса відповідала реальному виду
+  setTimeout(writeHashView, 500);
 
   // ============================================================
   //  KML: парсер + рендер
@@ -453,7 +494,14 @@
     let bounds = null;
     const lineHex = colorToHex(item.lineColor) || '#f43f5e';
     const polyHex = colorToHex(item.polyColor) || '#7c3aed';
-    const polyOpacity = item.polyColor ? (parseFloat(item.polyColor.match(/[\d.]+\)$/)?.[0].slice(0, -1)) || 0.3 : 0.3;
+    let polyOpacity = 0.3;
+    if (item.polyColor) {
+      const m = item.polyColor.match(/[\d.]+\)$/);
+      if (m) {
+        const v = parseFloat(m[0].slice(0, -1));
+        if (Number.isFinite(v)) polyOpacity = v;
+      }
+    }
 
     item.geometry.forEach(g => {
       let pts;
@@ -592,8 +640,6 @@
   }
 
   async function applyKmlText(text, { fit = true } = {}) {
-    setStatus('Обробка обʼєктів…');
-    await new Promise(r => setTimeout(r, 30));
     const placemarks = parseKML(text);
     if (!placemarks.length) throw new Error('KML не містить обʼєктів');
 
@@ -642,7 +688,8 @@
     console.log('[fronty] пропущено полігонів через !ringLatLngs.length:', window.__skippedPoly || 0);
 
     fCount.textContent = String(frontState.features.length);
-    if (fit && frontState.bounds && frontState.bounds.isValid()) {
+    if (fit && frontState.bounds && frontState.bounds.isValid() && !userTouchedMap) {
+      // Літаємо до фронту лише якщо користувач ще не встиг порухати мапу.
       map.flyToBounds(frontState.bounds, { padding: [50, 50], duration: 0.8, maxZoom: 14 });
     }
     clearStatus();
@@ -669,7 +716,6 @@
   let discoveredNetworkLink = null;
 
   async function loadFrontAuto(forceFit = true) {
-    setStatus('Завантаження KML…');
     const attempts = [];
 
     // Спочатку шукаємо NetworkLink у всіх локальних джерелах
@@ -720,7 +766,6 @@
       for (const proxy of CORS_PROXIES) {
         const proxyUrl = proxy.build(networkLinkUrl);
         try {
-          setStatus(`Завантаження через ${proxy.name}…`);
           const res = await fetch(proxyUrl, { cache: 'no-store' });
           if (!res.ok) {
             attempts.push(`❌ [${proxy.name}] HTTP ${res.status}`);
