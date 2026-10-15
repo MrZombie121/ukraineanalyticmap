@@ -14,9 +14,19 @@ services:
       - key: ADMIN_PASSWORD
         value: ""
       - key: DATA_DIR
-        value: /tmp/fronty-data
+        value: /var/data
       - key: ALLOWED_ORIGINS
         value: "https://uaanalyticmap.pp.ua,http://localhost:3000,https://www.uaanalyticmap.pp.ua"
+      - key: GOOGLE_MAPS_MID
+        value: "1E7cefbjfT33zErTQADATnyZ_SVChrJc"
+      - key: GOOGLE_FETCH_MIN
+        value: "10"
+      - key: GOOGLE_USER_AGENT
+        value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    disk:
+      name: fronty-data
+      mountPath: /var/data
+      sizeGB: 1
     autoDeploy: true
 
   # Static Site — фронт

@@ -19,6 +19,13 @@ const multer = require('multer');
 
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+
+// === Автосинхронізація з Google My Maps ===
+// MID карти і інтервал оновлення (хв). 0 = вимкнено.
+const GOOGLE_MAPS_MID = process.env.GOOGLE_MAPS_MID || '1E7cefbjfT33zErTQADATnyZ_SVChrJc';
+const GOOGLE_FETCH_MIN = parseInt(process.env.GOOGLE_FETCH_MIN || '10', 10); // 10 хв за замовч.
+const GOOGLE_USER_AGENT = process.env.GOOGLE_USER_AGENT ||
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const PASSWORD = process.env.ADMIN_PASSWORD || '';
 const FRONT_DIR = path.resolve(__dirname, '..');
 const HISTORY_DIR = path.join(DATA_DIR, 'history');
@@ -339,6 +346,127 @@ function broadcastUpdate(payload = {}) {
   });
 }
 
+// ============ Автосинхронізація з Google My Maps ============
+// Раз на GOOGLE_FETCH_MIN хвилин тягнемо KML напряму з Google (CORS не блокує — це сервер-сайд),
+// зберігаємо в history і розсилаємо WS. Curl-style UA бо Google блокує дефолтний Node fetch.
+let googleFetchInFlight = false;
+let googleFetchLog = []; // останні 20 статусів
+
+async function fetchGoogleKmlAsBuffer(mid) {
+  // forcekml=1 повертає повний KML напряму, без редіректів на UI
+  const url = `https://www.google.com/maps/d/kml?mid=${encodeURIComponent(mid)}&forcekml=1`;
+  // Node 18+ має глобальний fetch. Якщо нема — fallback на https.
+  if (typeof fetch === 'function') {
+    const r = await fetch(url, {
+      redirect: 'follow',
+      headers: { 'User-Agent': GOOGLE_USER_AGENT, 'Accept': '*/*' },
+    });
+    if (!r.ok) throw new Error(`Google HTTP ${r.status}`);
+    const ab = await r.arrayBuffer();
+    return Buffer.from(ab);
+  }
+  // Fallback на https
+  const https = require('https');
+  return await new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': GOOGLE_USER_AGENT } }, (resp) => {
+      if (resp.statusCode !== 200) {
+        resp.resume(); reject(new Error(`Google HTTP ${resp.statusCode}`)); return;
+      }
+      const chunks = [];
+      resp.on('data', c => chunks.push(c));
+      resp.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
+function pushFetchLog(entry) {
+  googleFetchLog.unshift({ ts: new Date().toISOString(), ...entry });
+  if (googleFetchLog.length > 20) googleFetchLog.pop();
+}
+
+async function syncFromGoogle(reason = 'manual') {
+  if (googleFetchInFlight) return { skipped: true, reason: 'already-running' };
+  if (!GOOGLE_MAPS_MID) return { skipped: true, reason: 'no-mid' };
+  googleFetchInFlight = true;
+  const startedAt = Date.now();
+  try {
+    const buf = await fetchGoogleKmlAsBuffer(GOOGLE_MAPS_MID);
+    const text = buf.toString('utf8');
+    // Шукаємо ознаки KML всередині — Google інколи повертає HTML
+    if (!text.includes('<kml') || !text.includes('<Placemark')) {
+      const e = { ok: false, reason: 'not-kml', size: buf.length, snippet: text.slice(0, 200) };
+      pushFetchLog(e);
+      console.warn(`[google-sync] ${reason}: відповідь не KML (${buf.length} байт)`);
+      return e;
+    }
+
+    const now = new Date();
+    const date = now.toISOString().slice(0, 10);
+    const time = now.toISOString().slice(11, 16);
+    const slotDir = path.join(HISTORY_DIR, date, time);
+    fs.mkdirSync(slotDir, { recursive: true });
+    // зберігаємо KMZ — у Google це вже KMZ (бінарний zip), але ми не змінюємо назву
+    const fileName = `google-${date}-${time}.kmz`;
+    const filePath = path.join(slotDir, fileName);
+    const tmpPath = path.join(DATA_DIR, `.${crypto.randomBytes(8).toString('hex')}.kmz`);
+    fs.writeFileSync(tmpPath, buf);
+    fs.renameSync(tmpPath, filePath);
+
+    const relPath = path.posix.join(date, time, fileName);
+    writeCurrent({
+      relPath,
+      mtime: Date.now(),
+      originalName: 'google-my-maps',
+      size: buf.length,
+      source: 'google-my-maps',
+      uploadedAt: now.toISOString(),
+    });
+    try { fs.writeFileSync(KMZ_PATH, buf); } catch {}
+
+    const took = Date.now() - startedAt;
+    const r = { ok: true, path: relPath, size: buf.length, took, reason };
+    pushFetchLog(r);
+    console.log(`[google-sync] ✓ ${reason}: ${buf.length} байт → history/${relPath} (${took}ms)`);
+    broadcastUpdate({ relPath, date, size: buf.length, source: 'google' });
+    return r;
+  } catch (e) {
+    const r = { ok: false, error: e.message, reason };
+    pushFetchLog(r);
+    console.warn(`[google-sync] ✗ ${reason}: ${e.message}`);
+    return r;
+  } finally {
+    googleFetchInFlight = false;
+  }
+}
+
+let googleTimer = null;
+function startGoogleSyncLoop() {
+  if (!GOOGLE_MAPS_MID || GOOGLE_FETCH_MIN <= 0) {
+    console.log(`[google-sync] вимкнено (GOOGLE_MAPS_MID=${GOOGLE_MAPS_MID ? '?' : '-'}, GOOGLE_FETCH_MIN=${GOOGLE_FETCH_MIN})`);
+    return;
+  }
+  const ms = GOOGLE_FETCH_MIN * 60 * 1000;
+  console.log(`[google-sync] увімкнено: mid=${GOOGLE_MAPS_MID.slice(0, 8)}…, інтервал=${GOOGLE_FETCH_MIN} хв`);
+  // перший запит — одразу, через 5 секунд після старту (щоб HTTP вже був готовий)
+  setTimeout(() => syncFromGoogle('startup'), 5000);
+  googleTimer = setInterval(() => syncFromGoogle('interval'), ms);
+}
+
+// API для ручного запуску
+app.post('/api/sync', (_req, res) => {
+  syncFromGoogle('admin').then(r => res.json(r));
+});
+
+// Статус останніх синхронізацій
+app.get('/api/sync-status', (_req, res) => {
+  res.json({
+    enabled: !!GOOGLE_MAPS_MID && GOOGLE_FETCH_MIN > 0,
+    mid: GOOGLE_MAPS_MID ? GOOGLE_MAPS_MID.slice(0, 8) + '…' : null,
+    intervalMin: GOOGLE_FETCH_MIN,
+    log: googleFetchLog,
+  });
+});
+
 wss.on('connection', (ws, req) => {
   const ip = req.socket.remoteAddress;
   console.log(`[ws+] ${ip} (всього: ${wss.clients.size})`);
@@ -367,7 +495,12 @@ server.listen(PORT, () => {
   console.log(`   DATA_DIR:   ${DATA_DIR}`);
   console.log(`   HISTORY:    ${HISTORY_DIR}`);
   console.log(`   Поточний:   ${readCurrent()?.relPath || '—'}`);
+  if (GOOGLE_MAPS_MID) {
+    console.log(`   GOOGLE MID: ${GOOGLE_MAPS_MID}`);
+    console.log(`   GOOGLE SYNC: кожні ${GOOGLE_FETCH_MIN} хв (POST /api/sync — ручний запуск)`);
+  }
   console.log(sep);
+  startGoogleSyncLoop();
 });
 
 process.on('SIGINT', () => {
