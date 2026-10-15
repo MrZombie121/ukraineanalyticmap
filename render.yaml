@@ -13,8 +13,6 @@ services:
     envVars:
       - key: ADMIN_PASSWORD
         value: ""
-      - key: DATA_DIR
-        value: /var/data
       - key: ALLOWED_ORIGINS
         value: "https://uaanalyticmap.pp.ua,http://localhost:3000,https://www.uaanalyticmap.pp.ua"
       - key: GOOGLE_MAPS_MID
@@ -23,10 +21,18 @@ services:
         value: "10"
       - key: GOOGLE_USER_AGENT
         value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    disk:
-      name: fronty-data
-      mountPath: /var/data
-      sizeGB: 1
+      - key: R2_ACCOUNT_ID
+        value: "b3a2ea917079b32d69fbfdbebeb9891a"
+      - key: R2_ACCESS_KEY_ID
+        value: "29f2e39bf402d3a73ea508ca7ea13f4e"
+      - key: R2_SECRET_KEY
+        value: "938547b82efa7f76839c00de6968adaf1f7a6f938e85c73f2c1eb4179d332d67"
+      - key: R2_BUCKET
+        value: "kmzfile"
+      - key: R2_PUBLIC_URL
+        value: "https://pub-4bcabed7f9914ca3a07e013c10300e18.r2.dev"
+      - key: R2_PREFIX
+        value: "uam"
     autoDeploy: true
 
   # Static Site — фронт

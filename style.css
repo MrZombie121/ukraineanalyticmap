@@ -471,6 +471,7 @@ button { font-family: inherit; }
   left: 16px;
   z-index: 950;
   width: 240px;
+  max-width: calc(100vw - 32px);
   padding: 0;
   overflow: hidden;
   border-radius: 14px;
@@ -506,10 +507,11 @@ button { font-family: inherit; }
 /* ========== ������ ���� ========== */
 .layer-panel {
   position: absolute;
-  top: 220px;
+  top: 460px;
   left: 16px;
   z-index: 950;
   width: 240px;
+  max-width: calc(100vw - 32px);
   padding: 0;
   overflow: hidden;
   border-radius: 14px;

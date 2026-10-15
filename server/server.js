@@ -16,14 +16,70 @@ const http = require('http');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const multer = require('multer');
+const {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  DeleteObjectsCommand,
+  HeadObjectCommand,
+} = require('@aws-sdk/client-s3');
 
 const PORT = process.env.PORT || 3001;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 
+// === Cloudflare R2 (S3-сумісний) ===
+const R2_ACCOUNT_ID     = process.env.R2_ACCOUNT_ID     || 'b3a2ea917079b32d69fbfdbebeb9891a';
+const R2_ACCESS_KEY_ID  = process.env.R2_ACCESS_KEY_ID  || '29f2e39bf402d3a73ea508ca7ea13f4e';
+const R2_SECRET_KEY     = process.env.R2_SECRET_KEY     || '938547b82efa7f76839c00de6968adaf1f7a6f938e85c73f2c1eb4179d332d67';
+const R2_BUCKET         = process.env.R2_BUCKET         || 'kmzfile';
+const R2_PUBLIC_URL     = process.env.R2_PUBLIC_URL     || 'https://pub-4bcabed7f9914ca3a07e013c10300e18.r2.dev';
+const R2_PREFIX         = process.env.R2_PREFIX         || 'uam'; // 'uam' для UAM, 'akv' для AKV
+
+let r2 = null;
+function getR2() {
+  if (r2) return r2;
+  r2 = new S3Client({
+    region: 'auto',
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: R2_ACCESS_KEY_ID,
+      secretAccessKey: R2_SECRET_KEY,
+    },
+    forcePathStyle: true,
+  });
+  return r2;
+}
+
+function r2Enabled() {
+  return !!(R2_ACCESS_KEY_ID && R2_SECRET_KEY && R2_BUCKET);
+}
+
+function buildR2Name(prefix, now = new Date()) {
+  // формат: uam-MM-DD-YY-Hour-Minute  (приклад: uam-10-15-26-15-30.kmz)
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const yy = String(now.getFullYear()).slice(-2);
+  const HH = String(now.getHours()).padStart(2, '0');
+  const MM = String(now.getMinutes()).padStart(2, '0');
+  return `${prefix}-${mm}-${dd}-${yy}-${HH}-${MM}.kmz`;
+}
+
+// Дістати дату й час з імені R2 файлу (для сортування і групування)
+function parseR2Name(name) {
+  const m = name.match(/^(uam|akv)-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})\.kmz$/);
+  if (!m) return null;
+  const [, prefix, mm, dd, yy, HH, MM] = m;
+  const year = 2000 + parseInt(yy, 10);
+  const date = `${year}-${mm}-${dd}`;
+  const time = `${HH}:${MM}`;
+  const iso = new Date(`${year}-${mm}-${dd}T${HH}:${MM}:00Z`).toISOString();
+  return { prefix, date, time, iso };
+}
+
 // === Автосинхронізація з Google My Maps ===
-// MID карти і інтервал оновлення (хв). 0 = вимкнено.
 const GOOGLE_MAPS_MID = process.env.GOOGLE_MAPS_MID || '1E7cefbjfT33zErTQADATnyZ_SVChrJc';
-const GOOGLE_FETCH_MIN = parseInt(process.env.GOOGLE_FETCH_MIN || '10', 10); // 10 хв за замовч.
+const GOOGLE_FETCH_MIN = parseInt(process.env.GOOGLE_FETCH_MIN || '10', 10);
 const GOOGLE_USER_AGENT = process.env.GOOGLE_USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 const PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -71,83 +127,115 @@ function checkAdmin(req, res, next) {
   return res.status(401).json({ error: 'Unauthorized. Потрібен ?token=... або X-Admin-Token' });
 }
 
-// ============ Helpers: history ============
+// ============ Helpers: history (R2 + локальний кеш) ============
 
-// Список усіх зрізів: [{ date: 'YYYY-MM-DD', files: [{time, name, size, mtime}] }]
-function readHistory() {
+// async-список — беремо з R2, групуємо за датою
+async function readHistoryR2() {
+  if (!r2Enabled()) return [];
   const out = [];
-  if (!fs.existsSync(HISTORY_DIR)) return out;
-  const dates = fs.readdirSync(HISTORY_DIR).sort().reverse();
-  for (const d of dates) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) continue;
-    const dayDir = path.join(HISTORY_DIR, d);
-    if (!fs.statSync(dayDir).isDirectory()) continue;
-    const slots = fs.readdirSync(dayDir).sort();
-    const files = [];
-    for (const slot of slots) {
-      const slotDir = path.join(dayDir, slot);
-      if (!fs.statSync(slotDir).isDirectory()) continue;
-      for (const f of fs.readdirSync(slotDir)) {
-        if (!/\.(kmz|kml)$/i.test(f)) continue;
-        const fp = path.join(slotDir, f);
-        const st = fs.statSync(fp);
-        files.push({
-          time: slot,                    // HH-MM
-          name: f,
-          size: st.size,
-          mtime: st.mtimeMs,
-          relPath: path.posix.join(d, slot, f),
-        });
-      }
+  try {
+    const client = getR2();
+    const command = new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: R2_PREFIX + '-',
+    });
+    const resp = await client.send(command);
+    const items = (resp.Contents || [])
+      .map(o => ({ name: o.Key, size: o.Size, mtime: o.LastModified ? new Date(o.LastModified).getTime() : 0 }))
+      .filter(x => x.name && x.name.endsWith('.kmz'))
+      .sort((a, b) => b.name.localeCompare(a.name)); // newest by name desc
+
+    const groups = new Map();
+    for (const it of items) {
+      const p = parseR2Name(path.basename(it.name));
+      if (!p) continue;
+      const day = groups.get(p.date) || { date: p.date, files: [] };
+      day.files.push({
+        name: path.basename(it.name),
+        time: p.time,
+        size: it.size,
+        mtime: it.mtime,
+        iso: p.iso,
+        relPath: it.name,
+      });
+      groups.set(p.date, day);
     }
-    if (files.length) {
-      // Показуємо найпізніший зріз дня як "свіжий" — sort за mtime
-      files.sort((a, b) => b.mtime - a.mtime);
-      out.push({ date: d, latest: files[0], count: files.length, files });
+    for (const day of groups.values()) {
+      day.files.sort((a, b) => b.iso.localeCompare(a.iso));
+      day.count = day.files.length;
+      day.latest = day.files[0];
+      out.push(day);
     }
+    out.sort((a, b) => b.date.localeCompare(a.date));
+  } catch (e) {
+    console.warn('[r2 list]', e.message);
   }
   return out;
 }
 
-function readCurrent() {
-  // current.json: { relPath, mtime, originalName, uploadedAt }
+// Знайти об'єкт за датою (найновіший у цій даті), або за relPath
+async function findInR2(date) {
+  if (!r2Enabled()) return null;
   try {
-    if (!fs.existsSync(CURRENT_POINTER)) return null;
-    return JSON.parse(fs.readFileSync(CURRENT_POINTER, 'utf8'));
+    const client = getR2();
+    const prefix = date ? `${R2_PREFIX}-${date.split('-').slice(1).join('-')}-` : R2_PREFIX + '-';
+    const resp = await client.send(new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: prefix,
+    }));
+    const items = (resp.Contents || []).filter(x => x.Key && x.Key.endsWith('.kmz'));
+    if (!items.length) return null;
+    items.sort((a, b) => (b.LastModified ? new Date(b.LastModified).getTime() : 0) - (a.LastModified ? new Date(a.LastModified).getTime() : 0));
+    return items[0].Key; // повертаємо key, а не Buffer
+  } catch (e) {
+    console.warn('[r2 find]', e.message);
+    return null;
+  }
+}
+
+async function getObjectFromR2(key) {
+  const client = getR2();
+  const resp = await client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+  // stream → buffer
+  const chunks = [];
+  for await (const c of resp.Body) chunks.push(c);
+  return { buffer: Buffer.concat(chunks), size: resp.ContentLength, lastModified: resp.LastModified };
+}
+
+async function readHistory() {
+  // Тільки R2 — локально нічого не зберігаємо
+  return await readHistoryR2();
+}
+
+async function readCurrent() {
+  // current.json — зберігаємо в R2, не локально (Render ephemeral)
+  if (!r2Enabled()) return null;
+  try {
+    const { buffer } = await getObjectFromR2(`${R2_PREFIX}-current.json`);
+    return JSON.parse(buffer.toString('utf8'));
   } catch { return null; }
 }
 
-function writeCurrent(meta) {
-  fs.writeFileSync(CURRENT_POINTER, JSON.stringify(meta, null, 2));
+async function writeCurrent(meta) {
+  if (!r2Enabled()) return;
+  try {
+    const client = getR2();
+    await client.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: `${R2_PREFIX}-current.json`,
+      Body: JSON.stringify(meta, null, 2),
+      ContentType: 'application/json',
+    }));
+  } catch (e) {
+    console.warn('[r2 current]', e.message);
+  }
 }
 
-function getKmzFilePath(date) {
-  // date = 'YYYY-MM-DD' або null (тоді — поточний)
-  if (date) {
-    const dayDir = path.join(HISTORY_DIR, date);
-    if (!fs.existsSync(dayDir)) return null;
-    // Беремо останній зріз у цій даті
-    const slots = fs.readdirSync(dayDir).sort();
-    for (let i = slots.length - 1; i >= 0; i--) {
-      const slotDir = path.join(dayDir, slots[i]);
-      if (!fs.statSync(slotDir).isDirectory()) continue;
-      const f = fs.readdirSync(slotDir).find(x => /\.(kmz|kml)$/i.test(x));
-      if (f) return { path: path.join(slotDir, f), relPath: path.posix.join(date, slots[i], f) };
-    }
-    return null;
-  }
-  // Поточний
-  const cur = readCurrent();
-  if (cur && cur.relPath) {
-    const p = path.join(HISTORY_DIR, cur.relPath);
-    if (fs.existsSync(p)) return { path: p, relPath: cur.relPath };
-  }
-  // Legacy fallback
-  if (fs.existsSync(KMZ_PATH)) return { path: KMZ_PATH, relPath: null };
-  for (const p of FALLBACK_PATHS) {
-    if (fs.existsSync(p)) return { path: p, relPath: null };
-  }
-  return null;
+async function getKmzR2(date) {
+  const key = await findInR2(date);
+  if (!key) return null;
+  const { buffer, size } = await getObjectFromR2(key);
+  return { buffer, size, key, relPath: key };
 }
 
 // ============ Health ============
@@ -165,19 +253,22 @@ app.get('/health', (_req, res) => {
 });
 
 // ============ History API ============
-app.get('/api/history', (_req, res) => {
-  res.json({ history: readHistory(), current: readCurrent() });
+app.get('/api/history', async (_req, res) => {
+  try {
+    const [history, current] = await Promise.all([readHistory(), readCurrent()]);
+    res.json({ history, current });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ============ KMZ serve ============
-function sendKmz(req, res, filePath) {
-  if (!filePath) {
-    return res.status(404).json({ error: 'Зріз не знайдено. Завантажте файл через /admin' });
+function sendKmzBuffer(req, res, buf, name) {
+  if (!buf || !buf.length) {
+    return res.status(404).json({ error: 'Зріз не знайдено' });
   }
   try {
-    const stat = fs.statSync(filePath);
-    const buf = fs.readFileSync(filePath);
-    const ext = filePath.toLowerCase();
+    const ext = (name || '').toLowerCase();
     const kind = ext.endsWith('.kml')
       ? 'application/vnd.google-earth.kml+xml'
       : 'application/vnd.google-earth.kmz';
@@ -189,32 +280,52 @@ function sendKmz(req, res, filePath) {
       'Access-Control-Allow-Origin': '*',
     });
     res.send(buf);
-    console.log(`[kmz] served ${path.basename(filePath)} (${buf.length} байт)`);
+    console.log(`[kmz] served ${name || 'r2'} (${buf.length} байт)`);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 }
 
-// Звичайний /kmz — поточний (back-compat)
-app.get('/kmz', (_req, res) => {
-  const f = getKmzFilePath(null);
-  if (!f) return res.status(404).json({ error: 'Жоден KMZ не знайдено' });
-  sendKmz(_req, res, f.path);
-});
-app.head('/kmz', (_req, res) => {
-  const f = getKmzFilePath(null);
-  if (!f) return res.status(404).end();
-  res.set({ 'Content-Type': 'application/vnd.google-earth.kmz' });
-  res.status(200).end();
-});
+async function resolveAndSend(req, res, date) {
+  if (!r2Enabled()) {
+    // legacy fallback на локальну ФС, якщо R2 вимкнено
+    let f = null;
+    if (date) {
+      const dayDir = path.join(HISTORY_DIR, date);
+      if (fs.existsSync(dayDir)) {
+        const slots = fs.readdirSync(dayDir).sort();
+        for (let i = slots.length - 1; i >= 0; i--) {
+          const slotDir = path.join(dayDir, slots[i]);
+          if (!fs.statSync(slotDir).isDirectory()) continue;
+          const x = fs.readdirSync(slotDir).find(y => /\.(kmz|kml)$/i.test(y));
+          if (x) { f = { path: path.join(slotDir, x), name: x }; break; }
+        }
+      }
+    } else {
+      const cur = readCurrent();
+      if (cur && cur.relPath) {
+        const p = path.join(HISTORY_DIR, cur.relPath);
+        if (fs.existsSync(p)) f = { path: p, name: path.basename(p) };
+      }
+      if (!f && fs.existsSync(KMZ_PATH)) f = { path: KMZ_PATH, name: 'fronty.kmz' };
+    }
+    if (!f) return res.status(404).json({ error: 'Жоден KMZ не знайдено' });
+    const buf = fs.readFileSync(f.path);
+    return sendKmzBuffer(req, res, buf, f.name);
+  }
+  try {
+    const r = await getKmzR2(date);
+    if (!r) return res.status(404).json({ error: date ? `Зріз за ${date} не знайдено` : 'Жоден KMZ не знайдено' });
+    sendKmzBuffer(req, res, r.buffer, path.basename(r.key));
+  } catch (e) {
+    console.error('[kmz]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
 
-// API з параметром date
-app.get('/api/kmz', (req, res) => {
-  const date = req.query.date || null;
-  const f = getKmzFilePath(date);
-  if (!f) return res.status(404).json({ error: date ? `Зріз за ${date} не знайдено` : 'Жоден KMZ не знайдено' });
-  sendKmz(req, res, f.path);
-});
+app.get('/kmz', (req, res) => resolveAndSend(req, res, null));
+app.head('/kmz', (_req, res) => res.set({ 'Content-Type': 'application/vnd.google-earth.kmz' }).status(200).end());
+app.get('/api/kmz', (req, res) => resolveAndSend(req, res, req.query.date || null));
 
 // ============ Upload ============
 const upload = multer({
@@ -384,6 +495,17 @@ function pushFetchLog(entry) {
   if (googleFetchLog.length > 20) googleFetchLog.pop();
 }
 
+async function uploadToR2(buffer, key, contentType = 'application/vnd.google-earth.kmz') {
+  if (!r2Enabled()) throw new Error('R2 not configured');
+  const client = getR2();
+  await client.send(new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    Body: buffer,
+    ContentType: contentType,
+  }));
+}
+
 async function syncFromGoogle(reason = 'manual') {
   if (googleFetchInFlight) return { skipped: true, reason: 'already-running' };
   if (!GOOGLE_MAPS_MID) return { skipped: true, reason: 'no-mid' };
@@ -392,7 +514,6 @@ async function syncFromGoogle(reason = 'manual') {
   try {
     const buf = await fetchGoogleKmlAsBuffer(GOOGLE_MAPS_MID);
     const text = buf.toString('utf8');
-    // Шукаємо ознаки KML всередині — Google інколи повертає HTML
     if (!text.includes('<kml') || !text.includes('<Placemark')) {
       const e = { ok: false, reason: 'not-kml', size: buf.length, snippet: text.slice(0, 200) };
       pushFetchLog(e);
@@ -401,33 +522,45 @@ async function syncFromGoogle(reason = 'manual') {
     }
 
     const now = new Date();
-    const date = now.toISOString().slice(0, 10);
-    const time = now.toISOString().slice(11, 16);
-    const slotDir = path.join(HISTORY_DIR, date, time);
-    fs.mkdirSync(slotDir, { recursive: true });
-    // зберігаємо KMZ — у Google це вже KMZ (бінарний zip), але ми не змінюємо назву
-    const fileName = `google-${date}-${time}.kmz`;
-    const filePath = path.join(slotDir, fileName);
-    const tmpPath = path.join(DATA_DIR, `.${crypto.randomBytes(8).toString('hex')}.kmz`);
-    fs.writeFileSync(tmpPath, buf);
-    fs.renameSync(tmpPath, filePath);
+    const fileName = buildR2Name(R2_PREFIX, now);
+    const key = fileName;
 
-    const relPath = path.posix.join(date, time, fileName);
-    writeCurrent({
-      relPath,
+    // Заливаємо в R2
+    if (r2Enabled()) {
+      try {
+        await uploadToR2(buf, key);
+      } catch (e) {
+        const r = { ok: false, error: 'r2 upload: ' + e.message, reason };
+        pushFetchLog(r);
+        console.warn(`[google-sync] ✗ ${reason}: R2 upload failed: ${e.message}`);
+        return r;
+      }
+    }
+
+    // (Опціонально) дзеркало в локальну ФС — корисно для `/admin` bulk-download
+    if (fs.existsSync(path.join(FRONT_DIR, '.keep-local'))) {
+      const date = now.toISOString().slice(0, 10);
+      const time = now.toISOString().slice(11, 16);
+      const slotDir = path.join(HISTORY_DIR, date, time);
+      fs.mkdirSync(slotDir, { recursive: true });
+      fs.writeFileSync(path.join(slotDir, fileName), buf);
+    }
+
+    const date = now.toISOString().slice(0, 10);
+    await writeCurrent({
+      relPath: key,
       mtime: Date.now(),
       originalName: 'google-my-maps',
       size: buf.length,
       source: 'google-my-maps',
       uploadedAt: now.toISOString(),
     });
-    try { fs.writeFileSync(KMZ_PATH, buf); } catch {}
 
     const took = Date.now() - startedAt;
-    const r = { ok: true, path: relPath, size: buf.length, took, reason };
+    const r = { ok: true, key, size: buf.length, took, reason };
     pushFetchLog(r);
-    console.log(`[google-sync] ✓ ${reason}: ${buf.length} байт → history/${relPath} (${took}ms)`);
-    broadcastUpdate({ relPath, date, size: buf.length, source: 'google' });
+    console.log(`[google-sync] ✓ ${reason}: ${buf.length} байт → r2://${R2_BUCKET}/${key} (${took}ms)`);
+    broadcastUpdate({ key, date, size: buf.length, source: 'r2' });
     return r;
   } catch (e) {
     const r = { ok: false, error: e.message, reason };
